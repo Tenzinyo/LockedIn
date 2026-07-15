@@ -71,6 +71,17 @@ class Settings:
     ML_TXN_COUNT_WINDOW_MINUTES: int = _env_int("ML_TXN_COUNT_WINDOW_MINUTES", 60)
     ML_RANDOM_STATE: int = _env_int("ML_RANDOM_STATE", 42)
 
+    # Fixed ordinal encoding for the `channel` feature — shared by
+    # scripts/train_model.py and agents/ml_agent.py so training and inference
+    # never drift apart on what each channel value means.
+    CHANNEL_ENCODING: dict = {
+        "mobile": 0,
+        "web": 1,
+        "atm": 2,
+        "pos": 3,
+        "branch": 4,
+    }
+
     # --- LLM Agent (agents/llm_agent.py) ---
     OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
     OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "llama3.1")

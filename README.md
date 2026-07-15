@@ -336,3 +336,93 @@ learn from.
   from `amount`, `channel`, `transaction_time`, etc.) to train the Isolation
   Forest, using `is_fraud` only to evaluate the trained model — never as a
   training feature.
+
+---
+
+## Milestone 4: Offline ML Model Training
+
+### Purpose
+
+`scripts/train_model.py` turns Milestone 3's synthetic transactions into a
+trained anomaly-detection model that Milestone 5's `agents/ml_agent.py` will
+load at inference time.
+
+- Pulls every transaction + its customer's baseline (`avg_txn_amount`) out of
+  Postgres.
+- Engineers the exact six features the ML agent will compute later:
+  `amount_to_avg_ratio`, `hour`, `day_of_week`, `txn_count_60min`,
+  `is_new_payee`, `channel_encoded`.
+- Fits a scikit-learn `IsolationForest` (`contamination=settings.ML_CONTAMINATION`,
+  the same 2% used to generate the data) — fully unsupervised, `is_fraud` is
+  never fed in as a feature.
+- Evaluates the trained model against `is_fraud` (precision/recall/confusion
+  matrix) purely as a sanity check, then saves the model to
+  `settings.ML_MODEL_PATH` (`models/fraud_model.pkl`) via joblib.
+
+### Architecture Diagram
+
+```
+scripts/train_model.py
+────────────────────────
+load_transactions_df() ──► Postgres (transactions JOIN customer_profiles)
+        │
+        ▼
+engineer_features()
+  - amount_to_avg_ratio = amount / customer.avg_txn_amount
+  - hour, day_of_week    <- transaction_time
+  - txn_count_60min      <- two-pointer sliding window per customer
+                             (settings.ML_TXN_COUNT_WINDOW_MINUTES)
+  - channel_encoded      <- settings.CHANNEL_ENCODING (shared with
+                             agents/ml_agent.py so train/inference never drift)
+        │
+        ▼
+IsolationForest(contamination=settings.ML_CONTAMINATION,
+                random_state=settings.ML_RANDOM_STATE)
+        │
+        ├──► evaluate against is_fraud (ground truth, sanity check only)
+        │
+        ▼
+joblib.dump ──► models/fraud_model.pkl ──► loaded by agents/ml_agent.py (M5)
+```
+
+### Usage / Testing Commands
+
+**Train the model** (Postgres must be running with Milestone 3's data
+already generated):
+```bash
+./venv/bin/python3 -m scripts.train_model
+```
+Expected output (numbers will vary slightly run to run since `generate_data.py`
+uses randomness, though the fraud rate is always fixed at 2%):
+```
+Trained on 12000 transactions, [...]
+Flagged as anomalies: 240 (2.00%)
+Classification report: fraud precision/recall around 0.7-0.8
+Model saved to models/fraud_model.pkl
+```
+
+**Verify the saved model loads and scores a transaction:**
+```bash
+./venv/bin/python3 -c "
+import joblib
+from config import settings
+model = joblib.load(settings.ML_MODEL_PATH)
+# [amount_to_avg_ratio, hour, day_of_week, txn_count_60min, is_new_payee, channel_encoded]
+print(model.predict([[12.0, 2, 3, 4, 1, 1]]))   # looks fraud-shaped -> expect [-1]
+print(model.predict([[1.0, 14, 3, 1, 0, 0]]))   # looks normal      -> expect [1]
+"
+```
+
+### Integration Points
+
+- Reuses `settings.ML_CONTAMINATION`, `settings.ML_RANDOM_STATE`,
+  `settings.ML_TXN_COUNT_WINDOW_MINUTES`, and the new `settings.CHANNEL_ENCODING`
+  (Milestone 2) — no new magic numbers introduced here.
+- `settings.CHANNEL_ENCODING` is the critical shared contract with Milestone 5:
+  `agents/ml_agent.py` must encode `channel` the same way at inference time or
+  the loaded model will silently score garbage.
+- `settings.ML_MODEL_PATH` (`models/fraud_model.pkl`) is the file
+  `agents/ml_agent.py` loads via `joblib.load()` — re-running
+  `train_model.py` overwrites it in place.
+- Must be re-run any time `scripts/generate_data.py` is re-run, since the
+  underlying transactions (and therefore the model) would otherwise be stale.
