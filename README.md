@@ -5,6 +5,11 @@ dependencies — everything runs on your local machine.
 
 ## Milestone 1: Local Infrastructure Setup
 
+> **In short:** stands up the database and the local AI model on your machine — the
+> plumbing every later milestone plugs into.
+> **Analogy:** installing the plumbing and electricity before you can cook anything in
+> the house.
+
 ### Purpose
 
 This milestone stands up the two pieces of infrastructure every later milestone depends
@@ -145,6 +150,11 @@ scratch, use 3.11, not whatever `python3` resolves to by default.
 
 ## Milestone 2: Configuration & Database Schemas
 
+> **In short:** one shared rulebook for every threshold/weight, and the database
+> filing cabinets every transaction, alert, and audit record will live in.
+> **Analogy:** designing the forms and house rules a bank branch will use before any
+> customer ever walks in.
+
 ### Purpose
 
 Two files, one goal: give every later milestone a single, consistent way to read
@@ -241,6 +251,11 @@ docker exec fraud_postgres psql -U fraud_admin -d fraud_detection -c "\d transac
 ---
 
 ## Milestone 3: Bhutanese Synthetic Data Generation
+
+> **In short:** manufactures a realistic pretend customer base and transaction history
+> (with known fraud mixed in) since there's no real bank data to train or test against.
+> **Analogy:** a flight simulator — practicing on realistic but fake scenarios before
+> anything touches a real plane.
 
 ### Purpose
 
@@ -341,6 +356,12 @@ learn from.
 
 ## Milestone 4: Offline ML Model Training
 
+> **In short:** teaches a model what "normal" spending looks like purely from patterns
+> in the data, with no fraud labels used, so it can later flag whatever doesn't fit.
+> **Analogy:** a security guard who's watched thousands of people walk through a lobby
+> and now notices when someone's behavior looks off — without ever being handed a list
+> of specific rules to check.
+
 ### Purpose
 
 `scripts/train_model.py` turns Milestone 3's synthetic transactions into a
@@ -430,6 +451,12 @@ print(model.predict([[1.0, 14, 3, 1, 0, 0]]))   # looks normal      -> expect [1
 ---
 
 ## Milestone 5: Deterministic Rules & ML Agents
+
+> **In short:** two independent judges score every transaction — one follows a fixed
+> checklist of red flags, the other looks for statistical oddities it learned in
+> Milestone 4.
+> **Analogy:** having both a checklist-following inspector and an experienced,
+> gut-instinct inspector examine the same shipment, independently and at the same time.
 
 ### Purpose
 
@@ -526,3 +553,135 @@ within `[0, 1]`.
   `scripts/train_model.py` is the fix, not a code change.
 - Milestone 6's `agents/llm_agent.py` will only be invoked when
   `rule_score` or `anomaly_score` exceeds `settings.LLM_INVOKE_THRESHOLD`.
+
+---
+
+## Milestone 6: Local LLM Agent with Tool Calling
+
+> **In short:** brings in a local AI investigator that actually looks things up before
+> writing its verdict, but only after the two judges from Milestone 5 already raised a
+> flag.
+> **Analogy:** calling in a detective only after the beat cop and the alarm system both
+> said something's wrong — the detective interviews witnesses (the tools) before
+> writing the case report, rather than guessing from the scene alone.
+
+### Purpose
+
+`agents/llm_agent.py` is Layer 4 — the expensive layer, only invoked when
+Layer 2 (rules) or Layer 3 (ML) already flagged a transaction, i.e.
+`max(rule_score, anomaly_score) > settings.LLM_INVOKE_THRESHOLD`. It gives
+Ollama's `llama3.1` three tools to investigate before writing a short
+natural-language explanation for the human analyst:
+
+- **`lookup_customer_history`** — recent transaction count, average amount,
+  distinct payees, account age, and prior flag count. Deliberately excludes
+  `is_fraud` — that ground-truth label must never reach any agent at
+  inference time.
+- **`check_ip_reputation`** — geolocation/network reputation via
+  `ip-api.com`'s free keyless endpoint.
+- **`get_merchant_risk`** — looks up `settings.MERCHANT_RISK_SCORES`
+  (Milestone 2).
+
+Per the aggregator design (Milestone 7), the LLM's value here is the audit
+trail it leaves — `AuditLog.llm_explanation` — not a further numeric score;
+invoking it contributes a flat `settings.LLM_WEIGHT` bump to `final_score`.
+
+### Architecture Diagram
+
+```
+rule_score, anomaly_score > LLM_INVOKE_THRESHOLD?
+        │ no                      │ yes
+        ▼                         ▼
+  skip (llm_called=False)   agents/llm_agent.py
+                                   │
+                          messages = [system, user_prompt]
+                                   │
+                                   ▼
+                    ollama.AsyncClient.chat(model=llama3.1, tools=TOOLS)
+                                   │
+                     ┌─────────────┼─────────────┐
+                     ▼             ▼              ▼
+           lookup_customer_   check_ip_    get_merchant_risk
+           history (Postgres) reputation   (config lookup)
+                (ip-api.com, httpx)
+                     │             │              │
+                     └─────────────┴──────────────┘
+                                   │  tool results appended to messages
+                                   ▼
+                     loop until no more tool_calls
+                     (capped at LLM_MAX_TOOL_ITERATIONS)
+                                   │
+                                   ▼
+                    final message.content -> llm_explanation
+```
+
+### Usage / Testing Commands
+
+**Test the LLM agent** (Ollama must be running with llama3.1 pulled — see
+Milestone 1; picks 2 known-fraud transactions, runs rules + ML agents first
+to get real scores, then investigates):
+```bash
+./venv/bin/python3 -m agents.llm_agent
+```
+Expected: an `llm_explanation` for each transaction, referencing specifics
+like the amount, merchant, IP country mismatch, or new-payee flag.
+
+**Verify tool calls are actually happening** (not just the model reasoning
+from the prompt alone) — prints each iteration's `tool_calls` and the tool's
+real result:
+```bash
+./venv/bin/python3 -c "
+import asyncio
+from sqlalchemy import select
+from agents.llm_agent import SYSTEM_PROMPT, TOOLS, _build_user_prompt, _execute_tool
+from agents.rules_agent import score_transaction as rules_score
+from agents.ml_agent import score_transaction as ml_score
+from db.models import Transaction, CustomerProfile, async_session, engine
+import ollama
+from config import settings
+
+async def main():
+    async with async_session() as session:
+        stmt = (select(Transaction, CustomerProfile)
+                .join(CustomerProfile, Transaction.customer_id == CustomerProfile.customer_id)
+                .where(Transaction.is_fraud.is_(True)).limit(1))
+        transaction, customer = (await session.execute(stmt)).first()
+        rule_result = await rules_score(transaction, customer, session)
+        anomaly = await ml_score(transaction, customer, session)
+        messages = [{'role': 'system', 'content': SYSTEM_PROMPT},
+                    {'role': 'user', 'content': _build_user_prompt(transaction, customer, rule_result.rule_score, anomaly, rule_result.triggered_rules)}]
+        client = ollama.AsyncClient(host=settings.OLLAMA_HOST)
+        for i in range(settings.LLM_MAX_TOOL_ITERATIONS):
+            resp = await client.chat(model=settings.OLLAMA_MODEL, messages=messages, tools=TOOLS)
+            msg = resp.message
+            print(f'iteration {i}: tool_calls={msg.tool_calls}')
+            messages.append(msg.model_dump())
+            if not msg.tool_calls:
+                print('FINAL:', msg.content)
+                break
+            for tc in msg.tool_calls:
+                result = await _execute_tool(tc.function.name, dict(tc.function.arguments), session)
+                print('  tool result:', tc.function.name, tc.function.arguments, '->', result)
+                messages.append({'role': 'tool', 'content': str(result)})
+    await engine.dispose()
+
+asyncio.run(main())
+"
+```
+Confirmed working: the model calls `lookup_customer_history` with a real
+`customer_id`, gets back a real result queried from Postgres, and folds it
+into its final explanation.
+
+### Integration Points
+
+- `agents/rules_agent.score_transaction()` and `agents/ml_agent.score_transaction()`
+  (Milestone 5) feed directly into `should_invoke()` and the prompt built for
+  the LLM — this agent never recomputes scores itself.
+- All DB and external calls (`lookup_customer_history`'s Postgres query,
+  `check_ip_reputation`'s `ip-api.com` call, and the Ollama chat call itself)
+  are wrapped in try/except, returning an `{"error": ...}` payload or a
+  fallback explanation string rather than crashing the pipeline.
+- Milestone 7's `main.py`/`pipeline/aggregator.py` will call `investigate()`
+  after Layers 2-3 run, store the result in `AuditLog.llm_explanation`, set
+  `AuditLog.llm_called`, and add `settings.LLM_WEIGHT` to `final_score` only
+  when the LLM was actually invoked.
