@@ -44,7 +44,7 @@ BHUTANESE_GIVEN_NAMES = [
     "Tshering", "Pema", "Dorji", "Karma", "Sonam", "Wangchuk", "Choden", "Yeshi",
     "Ugyen", "Namgyal", "Kinley", "Jigme", "Dechen", "Tandin", "Sangay", "Rinzin",
     "Kesang", "Phuntsho", "Tenzin", "Lhamo", "Zangmo", "Wangmo", "Norbu", "Chime",
-    "Pelden", "Dawa", "Nima", "Sangmo", "Dema", "Choki",
+    "Pelden", "Dawa", "Nima", "Zangmo", "Dema", "Choki",
 ]
 
 # Bhutanese given names are typically combined (no family surname convention).
@@ -136,35 +136,35 @@ def build_transactions(customers: list[CustomerProfile]) -> list[Transaction]:
     known_payees: dict[str, list[str]] = {cid: [] for cid in customer_ids}
     payee_counter = 0
 
-    # Build a list of "events" up front so the final fraud-row fraction lands
-    # on FRAUD_RATE exactly, regardless of burst grouping: a fraud event is
-    # either a single row or a 3-5 row velocity burst (all rows fraudulent),
-    # a normal event is always a single row.
-    fraud_row_budget = round(NUM_TRANSACTIONS * FRAUD_RATE)
-    events: list[tuple[bool, int]] = []
-    remaining_fraud = fraud_row_budget
-    while remaining_fraud > 0:
-        size = min(py_rng.randint(3, 5), remaining_fraud) if py_rng.random() < 0.30 else 1
-        events.append((True, size))
-        remaining_fraud -= size
-    normal_rows = NUM_TRANSACTIONS - sum(size for _, size in events)
-    events.extend((False, 1) for _ in range(normal_rows))
-    py_rng.shuffle(events)
+    n_fraud_target = int(NUM_TRANSACTIONS * FRAUD_RATE)
+    fraud_flags = np.zeros(NUM_TRANSACTIONS, dtype=bool)
+    fraud_flags[:n_fraud_target] = True
+    rng.shuffle(fraud_flags)
 
     transactions = []
-    for is_fraud, burst_size in events:
+    idx = 0
+    while idx < NUM_TRANSACTIONS:
+        is_fraud = bool(fraud_flags[idx])
         customer_id = py_rng.choice(customer_ids)
         profile = profile_by_id[customer_id]
+        category = str(rng.choice(CATEGORIES, p=CATEGORY_P))
+        low, high = CATEGORY_AMOUNT_RANGE[category]
+
+        # ~30% of fraud cases are rapid-fire bursts (velocity pattern): 3-5
+        # transactions for the same customer within the velocity window.
+        burst_size = 1
+        if is_fraud and py_rng.random() < 0.30:
+            burst_size = py_rng.randint(3, 5)
 
         for b in range(burst_size):
-            category = str(rng.choice(CATEGORIES, p=CATEGORY_P))
-            low, high = CATEGORY_AMOUNT_RANGE[category]
+            if idx >= NUM_TRANSACTIONS:
+                break
+
             payees = known_payees[customer_id]
             if is_fraud:
                 amount = round(profile.avg_txn_amount * py_rng.uniform(5, 20), 2)
                 amount = max(amount, low)
                 is_new_payee = py_rng.random() < 0.7 or not payees
-                use_blacklisted_ip = py_rng.random() < 0.2
                 ip_country = py_rng.choice(FOREIGN_COUNTRIES) if py_rng.random() < 0.6 else "BT"
                 if burst_size > 1:
                     txn_time = dt_at(DAYS_BACK, (0, 24)) - timedelta(
@@ -177,7 +177,6 @@ def build_transactions(customers: list[CustomerProfile]) -> list[Transaction]:
                 amount = round(max(rng.lognormal(mean=np.log(max(profile.avg_txn_amount, 50)), sigma=0.5), low), 2)
                 amount = min(amount, high * 1.5)
                 is_new_payee = py_rng.random() < 0.15 or not payees
-                use_blacklisted_ip = False
                 ip_country = "BT"
                 txn_time = dt_at(DAYS_BACK, (profile.usual_hour_start, profile.usual_hour_end))
 
@@ -190,7 +189,6 @@ def build_transactions(customers: list[CustomerProfile]) -> list[Transaction]:
 
             merchant_name = py_rng.choice(MERCHANTS[category])
             channel = CHANNELS[rng.choice(len(CHANNELS), p=CHANNEL_P)]
-            ip_address = py_rng.choice(settings.IP_BLACKLIST) if use_blacklisted_ip else random_ip(ip_country)
 
             transactions.append(
                 Transaction(
@@ -199,15 +197,16 @@ def build_transactions(customers: list[CustomerProfile]) -> list[Transaction]:
                     currency=settings.CURRENCY,
                     channel=channel,
                     merchant_category=category,
-                    merchant_name=merchant_name,
                     payee_id=payee_id,
                     is_new_payee=is_new_payee,
-                    ip_address=ip_address,
+                    ip_address=random_ip(ip_country),
                     ip_country=ip_country,
                     transaction_time=txn_time,
                     is_fraud=is_fraud,
                 )
             )
+            idx += 1
+            _ = merchant_name  # merchant name is illustrative only; schema stores the category
 
     return transactions
 
