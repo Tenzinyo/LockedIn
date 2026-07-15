@@ -65,6 +65,16 @@ class Settings:
 
     IP_BLACKLIST_SCORE: float = _env_float("IP_BLACKLIST_SCORE", 0.35)
 
+    # Static list of known-bad IPs for local dev/testing (no external threat
+    # feed — everything must run offline). Real deployments would swap this
+    # for a maintained blocklist.
+    IP_BLACKLIST: list = [
+        "203.0.113.66",
+        "198.51.100.23",
+        "185.220.101.1",
+        "45.155.204.10",
+    ]
+
     # --- ML Agent (agents/ml_agent.py) ---
     ML_CONTAMINATION: float = _env_float("ML_CONTAMINATION", 0.02)
     ML_MODEL_PATH: str = os.getenv("ML_MODEL_PATH", "models/fraud_model.pkl")

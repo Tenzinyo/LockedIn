@@ -426,3 +426,103 @@ print(model.predict([[1.0, 14, 3, 1, 0, 0]]))   # looks normal      -> expect [1
   `train_model.py` overwrites it in place.
 - Must be re-run any time `scripts/generate_data.py` is re-run, since the
   underlying transactions (and therefore the model) would otherwise be stale.
+
+---
+
+## Milestone 5: Deterministic Rules & ML Agents
+
+### Purpose
+
+Two independent scoring agents, run side by side in Milestone 7's pipeline,
+each producing a score in `[0, 1]`:
+
+- **`agents/rules_agent.py`** — six deterministic checks, each adding a fixed
+  weight to `rule_score` (capped at `settings.RULE_SCORE_CAP`): amount > 5x
+  the customer's average, >3 transactions in a 10-minute window, IP country ≠
+  home country, new payee + amount > 10,000 BTN, transaction between 1-4am,
+  and IP on the local blacklist. Every threshold/weight already lived in
+  `config.py` from Milestone 2 — this file only implements the checks.
+- **`agents/ml_agent.py`** — loads the Isolation Forest trained in
+  Milestone 4, computes the same six features for a single transaction, and
+  rescales the model's raw (unbounded) anomaly score into `[0, 1]` using the
+  1st/99th-percentile bounds saved alongside the model.
+- **`agents/features.py`** (new) — the feature-engineering logic shared
+  between `train_model.py` and `ml_agent.py`, so training and inference can
+  never quietly drift apart on what a feature means.
+
+### Architecture Diagram
+
+```
+Transaction + CustomerProfile
+        │
+        ├──────────────────────────────┬───────────────────────────────┐
+        ▼                               ▼
+agents/rules_agent.py            agents/ml_agent.py
+  score_transaction()              score_transaction()
+  - high_amount                    - amount_to_avg_ratio  ┐
+  - velocity (DB query)            - hour, day_of_week    ├─ agents/features.py
+  - ip_country_mismatch            - txn_count_60min       │  (shared w/ train_model.py)
+  - new_payee_high_amount          - is_new_payee          │
+  - night_hour                     - channel_encoded      ┘
+  - ip_blacklist                        │
+        │                               ▼
+        │                     models/fraud_model.pkl (Milestone 4)
+        │                       {model, score_low, score_high}
+        │                               │
+        ▼                               ▼
+  RuleResult(rule_score,          anomaly_score
+             triggered_rules)     (rescaled to [0,1])
+        │                               │
+        └───────────────┬───────────────┘
+                         ▼
+              Milestone 7's aggregator (not built yet)
+```
+
+### Usage / Testing Commands
+
+**Test the rules agent** (prints rule_score + triggered rules for 5 known
+fraud and 5 known normal transactions from Milestone 3's data):
+```bash
+./venv/bin/python3 -m agents.rules_agent
+```
+Expect fraud-sample scores well above 0 with multiple triggered rules, and
+normal-sample scores at (or near) 0.
+
+**Test the ML agent** (same sample split, prints anomaly_score):
+```bash
+./venv/bin/python3 -m agents.ml_agent
+```
+Expect fraud-sample scores noticeably higher than normal-sample scores, all
+within `[0, 1]`.
+
+### Issues hit while building this milestone (and fixes)
+
+1. **`IP_BLACKLIST_SCORE` existed in config.py since Milestone 2 but no
+   blacklist existed to check against**, so the rule could never fire.
+   **Fix:** added `settings.IP_BLACKLIST` (a small static list — no external
+   threat feed, everything stays offline) and updated
+   `scripts/generate_data.py` to assign a blacklisted IP to ~20% of
+   non-burst fraud transactions, so the rule has real data to catch.
+2. **IsolationForest's `decision_function` is unbounded**, so it can't be
+   used directly as a `[0, 1]` anomaly score. **Fix:** `train_model.py` now
+   saves the 1st/99th percentile of training-set decision scores alongside
+   the model; `ml_agent.py` linearly rescales against those bounds and clips
+   to `[0, 1]`.
+3. **Feature engineering was about to be duplicated** between
+   `train_model.py` (pandas, batch) and `ml_agent.py` (single transaction).
+   **Fix:** extracted `FEATURE_COLUMNS` and `amount_to_avg_ratio()` into
+   `agents/features.py`, imported by both.
+
+### Integration Points
+
+- Both agents take the same inputs — `(transaction, customer, session)` —
+  and will be called via `asyncio.gather()` in Milestone 7's `main.py`
+  (per the architecture's Layer 2/3 design), always writing to `audit_log`
+  regardless of outcome.
+- `agents/rules_agent.py`'s `triggered_rules` list is exactly the JSONB shape
+  `AuditLog.triggered_rules` expects.
+- `agents/ml_agent.py` raises `RuntimeError` at call time (not import time)
+  if `models/fraud_model.pkl` is missing, so re-running
+  `scripts/train_model.py` is the fix, not a code change.
+- Milestone 6's `agents/llm_agent.py` will only be invoked when
+  `rule_score` or `anomaly_score` exceeds `settings.LLM_INVOKE_THRESHOLD`.

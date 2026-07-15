@@ -21,17 +21,9 @@ from sklearn.ensemble import IsolationForest
 from sklearn.metrics import classification_report, confusion_matrix
 from sqlalchemy import select
 
+from agents.features import FEATURE_COLUMNS, amount_to_avg_ratio
 from config import settings
 from db.models import CustomerProfile, Transaction, async_session, engine
-
-FEATURE_COLUMNS = [
-    "amount_to_avg_ratio",
-    "hour",
-    "day_of_week",
-    "txn_count_60min",
-    "is_new_payee",
-    "channel_encoded",
-]
 
 
 async def load_transactions_df() -> pd.DataFrame:
@@ -77,8 +69,9 @@ def compute_velocity_counts(times: np.ndarray, window_minutes: int) -> np.ndarra
 def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.sort_values(["customer_id", "transaction_time"]).reset_index(drop=True)
 
-    df["amount_to_avg_ratio"] = df["amount"] / df["avg_txn_amount"].replace(0, np.nan)
-    df["amount_to_avg_ratio"] = df["amount_to_avg_ratio"].fillna(df["amount"])
+    df["amount_to_avg_ratio"] = df.apply(
+        lambda row: amount_to_avg_ratio(row["amount"], row["avg_txn_amount"]), axis=1
+    )
 
     df["hour"] = df["transaction_time"].dt.hour
     df["day_of_week"] = df["transaction_time"].dt.dayofweek
@@ -121,9 +114,16 @@ async def main() -> None:
     print("\nClassification report:")
     print(classification_report(df["is_fraud"], predicted_fraud, target_names=["not_fraud", "fraud"]))
 
+    # decision_function: high = normal, low/negative = anomalous, but it's
+    # unbounded — agents/ml_agent.py needs a 0-1 score, so we save the 1st/99th
+    # percentile of training scores here and linearly rescale against them at
+    # inference time (clipped to [0,1] for scores outside that range).
+    decision_scores = model.decision_function(X)
+    score_low, score_high = np.percentile(decision_scores, [1, 99])
+
     os.makedirs(os.path.dirname(settings.ML_MODEL_PATH), exist_ok=True)
-    joblib.dump(model, settings.ML_MODEL_PATH)
-    print(f"Model saved to {settings.ML_MODEL_PATH}")
+    joblib.dump({"model": model, "score_low": score_low, "score_high": score_high}, settings.ML_MODEL_PATH)
+    print(f"Model saved to {settings.ML_MODEL_PATH} (score_low={score_low:.4f}, score_high={score_high:.4f})")
 
     await engine.dispose()
 

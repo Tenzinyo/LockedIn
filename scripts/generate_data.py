@@ -164,6 +164,7 @@ def build_transactions(customers: list[CustomerProfile]) -> list[Transaction]:
                 amount = round(profile.avg_txn_amount * py_rng.uniform(5, 20), 2)
                 amount = max(amount, low)
                 is_new_payee = py_rng.random() < 0.7 or not payees
+                use_blacklisted_ip = py_rng.random() < 0.2
                 ip_country = py_rng.choice(FOREIGN_COUNTRIES) if py_rng.random() < 0.6 else "BT"
                 if burst_size > 1:
                     txn_time = dt_at(DAYS_BACK, (0, 24)) - timedelta(
@@ -176,6 +177,7 @@ def build_transactions(customers: list[CustomerProfile]) -> list[Transaction]:
                 amount = round(max(rng.lognormal(mean=np.log(max(profile.avg_txn_amount, 50)), sigma=0.5), low), 2)
                 amount = min(amount, high * 1.5)
                 is_new_payee = py_rng.random() < 0.15 or not payees
+                use_blacklisted_ip = False
                 ip_country = "BT"
                 txn_time = dt_at(DAYS_BACK, (profile.usual_hour_start, profile.usual_hour_end))
 
@@ -188,6 +190,7 @@ def build_transactions(customers: list[CustomerProfile]) -> list[Transaction]:
 
             merchant_name = py_rng.choice(MERCHANTS[category])
             channel = CHANNELS[rng.choice(len(CHANNELS), p=CHANNEL_P)]
+            ip_address = py_rng.choice(settings.IP_BLACKLIST) if use_blacklisted_ip else random_ip(ip_country)
 
             transactions.append(
                 Transaction(
@@ -199,7 +202,7 @@ def build_transactions(customers: list[CustomerProfile]) -> list[Transaction]:
                     merchant_name=merchant_name,
                     payee_id=payee_id,
                     is_new_payee=is_new_payee,
-                    ip_address=random_ip(ip_country),
+                    ip_address=ip_address,
                     ip_country=ip_country,
                     transaction_time=txn_time,
                     is_fraud=is_fraud,
