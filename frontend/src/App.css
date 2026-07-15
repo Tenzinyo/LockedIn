@@ -1,0 +1,278 @@
+/* --- Top bar (Bank of Bhutan brand: blue header + gold accent stripe) --- */
+.topbar {
+  background: var(--brand-blue);
+  color: #fff;
+}
+.topbar-inner {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 18px 20px;
+}
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.brand-name {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.brand-sub {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.85);
+}
+.topbar-accent {
+  height: 4px;
+  background: var(--brand-gold);
+}
+
+.page {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 24px 20px 64px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+/* --- Stat tiles --- */
+.stats-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 14px;
+}
+.stat-tile {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-top: 3px solid var(--brand-blue);
+  border-radius: 8px;
+  padding: 14px 16px;
+}
+.stat-value {
+  font-size: 28px;
+  font-weight: 700;
+  line-height: 1.1;
+}
+.stat-label {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-top: 4px;
+}
+
+/* --- Panels --- */
+.panel {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 20px;
+}
+.panel h2 {
+  margin: 0;
+  font-size: 18px;
+}
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.panel-subtitle {
+  color: var(--text-secondary);
+  font-size: 13px;
+  margin: 4px 0 16px;
+}
+.muted {
+  color: var(--text-muted);
+}
+
+/* --- Filter bar --- */
+.filter-bar {
+  display: flex;
+  gap: 6px;
+}
+.filter-btn {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 13px;
+  cursor: pointer;
+  text-transform: capitalize;
+}
+.filter-btn-active {
+  background: var(--brand-blue);
+  border-color: var(--brand-blue);
+  color: #fff;
+}
+
+/* --- Badges --- */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 3px 9px;
+  border-radius: 999px;
+  text-transform: capitalize;
+  white-space: nowrap;
+}
+.badge-critical { background: color-mix(in srgb, var(--critical) 16%, transparent); color: var(--critical); }
+.badge-warning  { background: color-mix(in srgb, var(--warning) 22%, transparent); color: #8a5c00; }
+.badge-good     { background: color-mix(in srgb, var(--good) 16%, transparent); color: var(--good); }
+.badge-muted    { background: color-mix(in srgb, var(--text-muted) 18%, transparent); color: var(--text-secondary); }
+
+/* --- Alerts list --- */
+.alerts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.alert-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.alert-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 14px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: var(--text-primary);
+}
+.alert-row:hover {
+  background: var(--brand-blue-tint);
+}
+.alert-cell {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.alert-customer { font-weight: 600; color: var(--text-primary); min-width: 90px; }
+.alert-amount { min-width: 110px; }
+.alert-merchant { flex: 1; }
+.alert-score { font-variant-numeric: tabular-nums; min-width: 40px; }
+.chevron { margin-left: auto; color: var(--text-muted); font-size: 18px; line-height: 1; }
+
+.alert-detail {
+  padding: 14px 16px 16px;
+  border-top: 1px solid var(--gridline);
+  background: var(--brand-blue-tint);
+}
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px 16px;
+  margin-bottom: 12px;
+}
+.detail-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  margin-bottom: 2px;
+}
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0;
+}
+.chip {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 12px;
+  text-transform: capitalize;
+}
+.explanation {
+  font-size: 14px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  margin: 4px 0 0;
+}
+.action-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+/* --- Buttons --- */
+.btn {
+  border-radius: 6px;
+  padding: 8px 16px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+.btn-primary {
+  background: var(--brand-blue);
+  color: #fff;
+}
+.btn-outline {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text-secondary);
+}
+.btn-gold {
+  background: var(--brand-gold);
+  color: #3a2e00;
+}
+.btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* --- Transaction form --- */
+.txn-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+}
+.txn-form input,
+.txn-form select {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-1);
+  color: var(--text-primary);
+  font-size: 14px;
+}
+.txn-form .btn {
+  grid-column: 1 / -1;
+  justify-self: start;
+}
+.form-error {
+  color: var(--critical);
+  font-size: 13px;
+}
+.result-card {
+  margin-top: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--brand-blue-tint);
+}
+.result-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.result-score {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}

@@ -685,3 +685,333 @@ into its final explanation.
   after Layers 2-3 run, store the result in `AuditLog.llm_explanation`, set
   `AuditLog.llm_called`, and add `settings.LLM_WEIGHT` to `final_score` only
   when the LLM was actually invoked.
+
+---
+
+## Milestone 7: Pipeline Aggregation & API Wiring
+
+> **In short:** wires every layer built so far into one live HTTP endpoint —
+> submit a transaction, get back a routing decision, backed by a real audit trail.
+> **Analogy:** the assembly line that finally connects every station (the two
+> inspectors, the detective) into one conveyor belt a real package can travel down.
+
+### Purpose
+
+`pipeline/aggregator.py` (Layer 5) and `main.py` (Layer 1) close the loop: a real
+HTTP request now flows through every agent built in Milestones 5-6 and comes back
+with a final routing decision.
+
+- **`main.py`** — a FastAPI app with `POST /api/v1/transaction`. Looks up the
+  customer profile (404 if unknown), determines `is_new_payee` by checking
+  Postgres for any prior transaction to that payee, persists the transaction,
+  runs the pipeline, and returns the result.
+- **`pipeline/aggregator.py`** — runs the rules and ML agents concurrently via
+  `asyncio.gather()`, invokes the LLM agent only if either score clears
+  `settings.LLM_INVOKE_THRESHOLD`, computes:
+  ```
+  final_score = rule_score * RULE_WEIGHT + anomaly_score * ML_WEIGHT
+                + (LLM_WEIGHT if llm_called else 0)
+  ```
+  routes on `settings.LOG_ONLY_MAX` / `settings.ANALYST_QUEUE_MAX`
+  (`log_only` / `analyst_queue` / `high_alert`), always writes an `AuditLog`
+  row, and creates an `Alert` row only for the latter two actions.
+
+### Architecture Diagram
+
+```
+POST /api/v1/transaction (main.py)
+        │
+        ├─ lookup CustomerProfile (404 if missing)
+        ├─ compute is_new_payee (DB check: any prior txn to this payee?)
+        ├─ INSERT Transaction, flush() -> gets transaction.id
+        ▼
+pipeline.aggregator.process_transaction()
+        │
+        ├─ asyncio.gather(rules_agent, ml_agent)  ── always runs
+        │        │
+        │        ▼
+        │   rule_score, anomaly_score
+        │        │
+        ├─ should_invoke()? ──yes──► llm_agent.investigate() ── gated
+        │        │
+        ▼        ▼
+  final_score = rule*0.40 + anomaly*0.35 + (0.15 if llm_called)
+        │
+        ├─ route: <0.35 log_only | <0.70 analyst_queue | >=0.70 high_alert
+        ├─ UPDATE transactions (scores + action)
+        ├─ INSERT audit_log (always)
+        └─ INSERT alerts (only analyst_queue / high_alert)
+        │
+        ▼
+  commit() ──► TransactionOut JSON response
+```
+
+### Usage / Testing Commands
+
+**Start the server** (Postgres running, Milestone 4's model trained, Ollama
+running — see Milestones 1/4/6):
+```bash
+./venv/bin/python3 -m uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+**Health check:**
+```bash
+curl -s http://localhost:8000/health
+```
+
+**Submit a normal-looking transaction:**
+```bash
+curl -s -X POST http://localhost:8000/api/v1/transaction \
+  -H "Content-Type: application/json" \
+  -d '{
+    "customer_id": "CUST00001", "amount": 1500, "channel": "mobile",
+    "merchant_category": "grocery", "merchant_name": "Norzin Lam Grocery",
+    "payee_id": "PAYEE000001", "ip_address": "119.2.10.5", "ip_country": "BT",
+    "transaction_time": "2026-07-15T14:00:00Z"
+  }'
+```
+Expect `action: "log_only"` and a low `final_score`.
+
+**Submit a fraud-shaped transaction** (high amount, blacklisted IP, foreign
+country, new payee, night hour):
+```bash
+curl -s -X POST http://localhost:8000/api/v1/transaction \
+  -H "Content-Type: application/json" \
+  -d '{
+    "customer_id": "CUST00001", "amount": 45000, "channel": "web",
+    "merchant_category": "crypto_exchange", "merchant_name": "DrukCoin Exchange",
+    "payee_id": "PAYEE999999", "ip_address": "185.220.101.1", "ip_country": "AE",
+    "transaction_time": "2026-07-15T02:30:00Z"
+  }'
+```
+Expect `rule_score: 1.0`, all 5 rules in `triggered_rules`, `action: "high_alert"`,
+and a non-null `alert_id`.
+
+**Verify the DB state matches the response:**
+```bash
+docker exec fraud_postgres psql -U fraud_admin -d fraud_detection -c \
+  "SELECT id, action, final_score FROM transactions ORDER BY id DESC LIMIT 2;"
+docker exec fraud_postgres psql -U fraud_admin -d fraud_detection -c "SELECT * FROM alerts;"
+```
+
+**Submit an unknown customer_id** — expect HTTP 404:
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" -X POST http://localhost:8000/api/v1/transaction \
+  -H "Content-Type: application/json" \
+  -d '{"customer_id":"CUST99999","amount":100,"channel":"mobile","merchant_category":"grocery","merchant_name":"Test","ip_address":"1.2.3.4"}'
+```
+
+### Issues hit while building this milestone (and fixes)
+
+1. **The plan mentioned an "async queue" for Layer 1**, but adding real queue
+   infrastructure (Redis/Celery) would violate the "no cloud dependencies"
+   principle and wasn't needed at this scale. **Resolution:** FastAPI's async
+   endpoint handler processes the transaction inline — still fully
+   non-blocking (`asyncio.gather()`, async DB/HTTP calls throughout) without
+   introducing new infra.
+2. **Rules/ML velocity queries need the current transaction's own row to
+   exist** (they count transactions with `transaction_time <= now`,
+   inclusive of itself). **Fix:** `main.py` calls `session.flush()` right
+   after adding the new `Transaction` — assigns `transaction.id` and makes
+   the row visible to same-session queries without a full commit.
+3. **Small-model quirk, not a bug:** on the fraud-shaped test transaction,
+   llama3.1 wrote what looked like an attempted follow-up tool call
+   (`{"name": "lookup_merchant_history", ...}`) as plain text inside its
+   final answer instead of issuing a real tool call. The explanation was
+   still usable and the real tool call earlier in the same conversation
+   worked correctly — this is a known small-model tool-calling limitation,
+   not something to patch around in the pipeline code.
+
+### Integration Points
+
+- Reuses `settings.RULE_WEIGHT`, `settings.ML_WEIGHT`, `settings.LLM_WEIGHT`,
+  `settings.LOG_ONLY_MAX`, `settings.ANALYST_QUEUE_MAX`, and
+  `settings.API_V1_PREFIX` / `APP_HOST` / `APP_PORT` — all defined since
+  Milestone 2, none new.
+- Calls `agents.rules_agent`, `agents.ml_agent`, and `agents.llm_agent`
+  (Milestones 5-6) with no changes to those files.
+- Every request that reaches `pipeline.process_transaction()` writes to
+  `AuditLog` regardless of outcome — that's the compliance trail Milestone 2
+  designed the table for.
+- Milestone 8's React dashboard will read `alerts` (via a future `GET`
+  endpoint on this same FastAPI app, not directly from Postgres) to display
+  open alerts and their `llm_explanation` text.
+
+---
+
+## Milestone 8: Analyst React Dashboard
+
+> **In short:** the human-facing screen an analyst actually works from — a live
+> view of open alerts, the full evidence behind each one, and a place to try a
+> transaction and watch the pipeline score it in real time.
+> **Analogy:** the security office's monitor wall — every camera feed (agent) has
+> been running this whole time, but this is the first screen a person actually
+> looks at to decide what to do about it.
+
+### Purpose
+
+`frontend/` (React + Vite) is the last piece: an analyst dashboard that turns the
+JSON the API already returns into something a human can act on.
+
+- **`main.py`** gained three endpoints the dashboard needs: `GET /api/v1/alerts`
+  (filterable by status, joined with the transaction and audit-log context),
+  `PATCH /api/v1/alerts/{id}` (mark reviewed/dismissed), and `GET /api/v1/stats`
+  (counts for the header tiles). CORS middleware was added so a
+  separately-served frontend can call it.
+- **`agents/llm_agent.py`** gained a `settings.LLM_ENABLED` guard — if there's no
+  local Ollama to call (the public demo host, see below), `investigate()`
+  returns a clear "not available in this environment" message instead of
+  hanging or erroring against an unreachable `localhost:11434`.
+- **`frontend/src/App.jsx`** — stat tiles (transactions scored, open/reviewed
+  alerts, high-alert count), a filterable alert list where each row expands to
+  show the full transaction, triggered rules, and LLM explanation with
+  Reviewed/Dismiss actions, and a "try a live transaction" form that hits
+  `POST /api/v1/transaction` and shows the real-time scoring result.
+- Visual design pulls its brand color and gold accent directly from Bank of
+  Bhutan's live site (`bob.bt`'s stylesheet: `#006ea9` blue, `#ffcb05` gold);
+  severity/status badges use the dataviz skill's fixed, accessibility-validated
+  status palette (good/warning/critical) so state colors never get reinterpreted
+  as branding.
+
+### Architecture Diagram
+
+```
+frontend/src/App.jsx (React + Vite, localhost:5173 in dev)
+        │
+        ├─ GET /api/v1/stats ───────────► stat tiles
+        ├─ GET /api/v1/alerts?status=  ──► alert list (open/reviewed/dismissed/all)
+        │        │
+        │        └─ click row ──► expand: scores, triggered_rules, llm_explanation
+        │                          └─ PATCH /api/v1/alerts/{id} ──► Reviewed / Dismiss
+        │
+        └─ POST /api/v1/transaction ────► live pipeline run (Milestone 7)
+                                            └─ result card: action, final_score,
+                                               triggered_rules, llm_explanation
+```
+
+### Usage / Testing Commands
+
+**Start the backend** (Postgres running, model trained, Ollama running — see
+Milestones 1/4/6):
+```bash
+./venv/bin/python3 -m uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+**Start the dashboard** (separate terminal):
+```bash
+cd frontend
+npm install
+npm run dev
+```
+Open `http://localhost:5173`. `frontend/.env.development` points it at
+`http://localhost:8000` by default (`VITE_API_BASE_URL`).
+
+**What to check:**
+- Stat tiles match `GET /api/v1/stats`.
+- The "Open" filter shows only open alerts; switching to "All" shows everything.
+- Expanding a row shows transaction details, triggered rules as chips, and the
+  LLM explanation (or "(not invoked)" if the LLM threshold wasn't cleared).
+- "Mark Reviewed" / "Dismiss" immediately move the alert out of the Open filter.
+- Submitting the test-transaction form returns a real score within a few
+  seconds (log_only/analyst_queue) or up to ~30-90s if it clears
+  `LLM_INVOKE_THRESHOLD` and triggers a real local LLM call.
+
+**Verified with an actual headless-browser run** (Playwright), not just a
+visual read of the code — confirmed zero console errors, real data rendering
+from Postgres, and a live transaction submission correctly updating the stat
+tiles and alert list.
+
+### Issues hit while building this milestone (and fixes)
+
+1. **Test-transaction result card showed a wrong "Analyst Queue" badge even for
+   `log_only` results.** The result renderer assumed every submitted
+   transaction was either `high_alert` or `analyst_queue`, but `log_only` (no
+   alert at all) is a valid third outcome. **Fix:** only render the severity
+   badge when `action !== "log_only"`, and humanize the action text
+   (`log_only` → `log only`) instead of showing the raw enum value.
+2. **Repeated test submissions for the same customer stacked up slow LLM
+   calls.** Ollama processes one generation at a time; firing several
+   test transactions back-to-back for the same customer queued their LLM
+   investigations behind each other, making later ones look "hung" when they
+   were just waiting in line. Not a bug — real usage submits one transaction
+   at a time — but worth knowing: a `log_only`/`analyst_queue` decision comes
+   back in well under a second: it's specifically the (gated) LLM call that
+   can take 30-90s+ on local CPU inference.
+
+### Integration Points
+
+- Talks only to the Milestone 7 API (`/api/v1/stats`, `/api/v1/alerts`,
+  `/api/v1/transaction`) — no direct Postgres access from the frontend.
+- `settings.CORS_ORIGINS` (Milestone 2 style: env-overridable, defaults to the
+  Vite dev server) must include whatever origin the frontend is actually
+  served from — the public demo deployment overrides it with the GitHub
+  Pages URL (see "Public Demo Deployment" below).
+- `settings.LLM_ENABLED` is the switch the public demo deployment flips off,
+  since there's no local Ollama on Render — rules and ML still score live
+  either way.
+
+---
+
+## Public Demo Deployment (beyond the 8 milestones) — PLANNED, NOT YET BUILT
+
+Not part of the original milestone plan, but requested directly: a public,
+shareable link for demos. Since the project's core rule is "100% local, no
+paid APIs," the deployed version has to keep that promise by design rather
+than by exception. This section documents the decided plan so it can be
+picked up later — nothing below has been executed yet.
+
+### Decisions made
+
+- **Frontend** → **GitHub Pages** (static build of `frontend/`, deployed
+  straight from this repo — free, no extra account beyond GitHub). Swapped in
+  for the originally-considered Vercel option since Pages ties directly to
+  the repo and needs no separate signup.
+- **Backend + DB** → **Render** (FastAPI + a hosted Postgres, free tier).
+  GitHub Pages only serves static files — it cannot run the FastAPI process
+  or host Postgres, so the backend still needs real server hosting.
+- **Rules + ML layers run live** in the hosted deployment — real scoring on
+  whatever transaction a visitor submits through the demo form.
+- **LLM layer does not call a cloud/paid model.** `LLM_ENABLED=false` in
+  Render's environment variables makes `investigate()` (agents/llm_agent.py)
+  return a clear "not available in this environment" message for any *new*
+  transaction submitted on the public demo, instead of hanging or erroring
+  trying to reach a `localhost:11434` that doesn't exist on Render. The
+  seeded historical alerts, however, keep their **genuine** `llm_explanation`
+  text — generated locally against the real Ollama + llama3.1 before the demo
+  dataset was exported — so visitors still see real LLM reasoning on the
+  example fraud cases, just not live for their own submissions.
+
+This keeps the public demo honest: nothing it shows is fabricated or routed
+through a paid API, and the one capability it can't reproduce (a local LLM)
+is clearly labeled rather than silently faked.
+
+### Remaining work (in order)
+
+1. **Batch-generate LLM explanations for the seed dataset** — a new script
+   (not yet written) that runs `agents/llm_agent.investigate()` locally,
+   with real Ollama, against every seeded transaction whose `rule_score` or
+   `anomaly_score` already clears `settings.LLM_INVOKE_THRESHOLD`, and saves
+   the result into `AuditLog.llm_explanation` / `Alert.explanation` — so the
+   exported demo dataset has genuine LLM text baked in before it ever reaches
+   Render.
+2. **Provision Render**: a Postgres instance (free tier) + a web service
+   running `main.py` (`uvicorn main:app --host 0.0.0.0 --port $PORT`).
+   Environment variables needed: `DATABASE_URL`-equivalent
+   (`DB_HOST`/`DB_PORT`/`DB_USER`/`DB_PASSWORD`/`DB_NAME` — Render's hosted
+   Postgres provides these), `LLM_ENABLED=false`, and `CORS_ORIGINS` set to
+   the eventual GitHub Pages URL.
+3. **Load the seeded dataset (with pre-baked LLM text) into Render's
+   Postgres** — export/import from the local DB once step 1 is done, rather
+   than running `scripts/generate_data.py` fresh on Render (that would lose
+   the pre-generated explanations and reset ground truth).
+4. **Build + deploy the frontend to GitHub Pages**:
+   - A GitHub Actions workflow that runs `npm run build` in `frontend/` and
+     publishes `dist/` via Pages' "deploy from Actions" flow.
+   - `VITE_API_BASE_URL` set at build time (via the workflow's env, not
+     `.env.development`) to the real Render backend URL.
+   - Vite's `base` config path set to match the Pages URL structure if the
+     site isn't served from the domain root (e.g. `/LockedIn/` for a repo
+     site at `username.github.io/LockedIn/`).
+5. **Point `settings.CORS_ORIGINS` on Render at the final `*.github.io` URL**
+   once it's known (chicken-and-egg with step 2 — may need one redeploy after
+   the Pages URL is confirmed).

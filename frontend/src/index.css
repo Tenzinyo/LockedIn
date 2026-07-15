@@ -1,0 +1,84 @@
+:root {
+  color-scheme: light;
+  --surface-1: #fcfcfb;
+  --page: #f4f7f9;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #898781;
+  --gridline: #e1e0d9;
+  --border: rgba(11, 11, 11, 0.1);
+
+  /* Bank of Bhutan brand colors (sampled from bob.bt's live stylesheet) */
+  --brand-blue: #006ea9;
+  --brand-blue-light: #14a4de;
+  --brand-gold: #ffcb05;
+  --brand-blue-tint: #eaf6fc;
+
+  /* Status palette — fixed, never themed; reserved for severity/state only */
+  --good: #0ca30c;
+  --warning: #fab219;
+  --serious: #ec835a;
+  --critical: #d03b3b;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --surface-1: #1a1a19;
+    --page: #0d0d0d;
+    --text-primary: #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted: #898781;
+    --gridline: #2c2c2a;
+    --border: rgba(255, 255, 255, 0.1);
+
+    --brand-blue: #3987e5;
+    --brand-blue-light: #14a4de;
+    --brand-gold: #ffd633;
+    --brand-blue-tint: #10222c;
+
+    --good: #0ca30c;
+    --warning: #fab219;
+    --serious: #ec835a;
+    --critical: #d03b3b;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface-1: #1a1a19;
+  --page: #0d0d0d;
+  --text-primary: #ffffff;
+  --text-secondary: #c3c2b7;
+  --text-muted: #898781;
+  --gridline: #2c2c2a;
+  --border: rgba(255, 255, 255, 0.1);
+
+  --brand-blue: #3987e5;
+  --brand-blue-light: #14a4de;
+  --brand-gold: #ffd633;
+  --brand-blue-tint: #10222c;
+
+  --good: #0ca30c;
+  --warning: #fab219;
+  --serious: #ec835a;
+  --critical: #d03b3b;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: var(--page);
+  color: var(--text-primary);
+}
+
+#root {
+  min-height: 100vh;
+}
+
+a {
+  color: inherit;
+}

@@ -20,6 +20,10 @@ def _env_int(name: str, default: int) -> int:
     return int(os.getenv(name, default))
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    return os.getenv(name, str(default)).strip().lower() in ("1", "true", "yes")
+
+
 class Settings:
     # --- Database (matches docker-compose.yml) ---
     DB_HOST: str = os.getenv("DB_HOST", "localhost")
@@ -40,6 +44,10 @@ class Settings:
     API_V1_PREFIX: str = "/api/v1"
     APP_HOST: str = os.getenv("APP_HOST", "0.0.0.0")
     APP_PORT: int = _env_int("APP_PORT", 8000)
+    # Comma-separated list; the Vite dev server and the deployed dashboard
+    # both need explicit origins here since they run on a different
+    # host/port than the API.
+    CORS_ORIGINS: list = os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")
 
     # --- Currency ---
     CURRENCY: str = "BTN"
@@ -93,6 +101,9 @@ class Settings:
     }
 
     # --- LLM Agent (agents/llm_agent.py) ---
+    # False only in environments with no local Ollama to call (e.g. the
+    # public demo deployment) — Layers 2-3 still score live either way.
+    LLM_ENABLED: bool = _env_bool("LLM_ENABLED", True)
     OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
     OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "llama3.1")
     LLM_INVOKE_THRESHOLD: float = _env_float("LLM_INVOKE_THRESHOLD", 0.20)

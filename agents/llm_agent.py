@@ -175,6 +175,9 @@ async def investigate(
     if not should_invoke(rule_score, anomaly_score):
         return None
 
+    if not settings.LLM_ENABLED:
+        return "LLM investigation not available in this environment (requires local Ollama)."
+
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": _build_user_prompt(transaction, customer, rule_score, anomaly_score, triggered_rules)},
