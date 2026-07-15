@@ -88,6 +88,7 @@ class Transaction(Base):
         SAEnum(TransactionChannel, native_enum=False, length=16), nullable=False
     )
     merchant_category: Mapped[str] = mapped_column(String(32), nullable=False)
+    merchant_name: Mapped[str] = mapped_column(String(64), nullable=False)
 
     payee_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     is_new_payee: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

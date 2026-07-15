@@ -237,3 +237,102 @@ docker exec fraud_postgres psql -U fraud_admin -d fraud_detection -c "\d transac
 - `Transaction.is_fraud` is a ground-truth label for synthetic data generation and
   model evaluation only — it must never be passed into the rules/ML/LLM agents at
   inference time, since real transactions won't have it.
+
+---
+
+## Milestone 3: Bhutanese Synthetic Data Generation
+
+### Purpose
+
+There's no real bank data to work with (and this project never touches real data
+anyway — 100% local/private). `scripts/generate_data.py` manufactures a realistic
+stand-in so every later milestone has something to train and test against:
+
+- **500 customer profiles** — Bhutanese names, spending baselines
+  (`avg_txn_amount`), and usual active hours per customer.
+- **12,000 transactions** — BTN currency, real Bhutan-region merchants
+  (TashiCell, B-Mobile, Thimphu Centenary Farmers Market, Druk Jewellers, etc.),
+  weighted so everyday categories (grocery, telecom, retail) dominate and
+  high-risk ones (crypto, jewelry, gaming) stay rare.
+- **~2% injected fraud** — the fraud rate reuses `settings.ML_CONTAMINATION`
+  (already defined in Milestone 2) rather than a new hardcoded constant, since
+  that's the same 2% the Isolation Forest in Milestone 4 will be tuned for.
+  Fraud rows are pushed to look anomalous on purpose: 5-20x the customer's
+  normal amount, odd hours (1-4am), new payees, foreign IP countries, and — for
+  ~30% of fraud cases — rapid-fire bursts of 3-5 transactions within the
+  velocity window (`settings.VELOCITY_WINDOW_MINUTES`), so Milestone 5's
+  velocity rule has real bursts to catch.
+
+### Architecture Diagram
+
+```
+scripts/generate_data.py
+─────────────────────────
+build_customers()  ──► 500 CustomerProfile rows ──► async_session ──► Postgres
+        │                                                                │
+        ▼                                                                │
+build_transactions()                                                     │
+  - picks category/merchant per weighted probabilities                  │
+  - normal txns: lognormal around customer's avg_txn_amount             │
+  - fraud txns (~2%, via settings.ML_CONTAMINATION):                    │
+      amount x5-20, night hours, new payee, foreign IP,                 │
+      30% as 3-5 txn velocity bursts                                    │
+        │                                                                │
+        ▼                                                                │
+  12,000 Transaction rows ──► batched async_session.add_all() ──────────►┘
+  (1,000 rows/batch, committed per batch)
+```
+
+### Usage / Testing Commands
+
+**Generate the dataset** (clears any previously generated rows first, so it's
+safe to re-run — Postgres must be running, see Milestone 1):
+```bash
+./venv/bin/python3 -m scripts.generate_data
+```
+Expected output:
+```
+Customers created: 500
+Transactions created: 12000
+Fraud transactions: 240 (2.00%)
+```
+
+**Spot-check the data:**
+```bash
+docker exec fraud_postgres psql -U fraud_admin -d fraud_detection -c \
+  "SELECT is_fraud, count(*), round(avg(amount)::numeric,2) FROM transactions GROUP BY is_fraud;"
+docker exec fraud_postgres psql -U fraud_admin -d fraud_detection -c \
+  "SELECT merchant_category, count(*) FROM transactions GROUP BY merchant_category ORDER BY 2 DESC;"
+```
+Fraud rows should average noticeably higher amounts than non-fraud rows — if
+they look statistically identical, Milestone 4's model will have nothing to
+learn from.
+
+### Issues hit while building this milestone (and fixes)
+
+1. **Fraud rate drifted to 3.55% instead of the target 2%.** The first version
+   picked `is_fraud` per-transaction from a pre-shuffled flag array, but
+   velocity-burst fraud events generate 3-5 rows per event — so consuming
+   multiple array slots per event desynced the flag index from the actual row
+   count. **Fix:** build a list of "events" up front (single row or 3-5 row
+   burst) sized to hit the exact fraud-row budget, then top up with single-row
+   normal events to reach 12,000 total, and shuffle the event list — not
+   individual rows.
+2. **`merchant_name` was computed but had nowhere to go.** The generator picked
+   a specific merchant (e.g. "TashiCell") per transaction for realism, but
+   `Transaction` only had `merchant_category` — the name was being discarded.
+   **Fix:** added a `merchant_name` column to `Transaction` in `db/models.py`
+   (Milestone 2) and wired it through; tables were dropped and recreated to
+   pick up the new column.
+
+### Integration Points
+
+- Reuses `settings.ML_CONTAMINATION` (Milestone 2) as the fraud injection rate
+  and `settings.VELOCITY_WINDOW_MINUTES` / `NIGHT_HOUR_START` / `NIGHT_HOUR_END`
+  to shape fraud patterns — no new magic numbers introduced for these.
+- Writes through `db.models.async_session` / `engine`, the same handles
+  Milestone 7's `main.py` and Milestone 8's dashboard will use.
+- Milestone 4's `train_model.py` reads these transactions (features derived
+  from `amount`, `channel`, `transaction_time`, etc.) to train the Isolation
+  Forest, using `is_fraud` only to evaluate the trained model — never as a
+  training feature.
